@@ -3580,6 +3580,9 @@ impl Workspace {
                 self.sync_panel_positions_from_config(ctx);
                 ctx.notify();
             }
+            TabSettingsChangedEvent::ShowTabCountInFolderHeader { .. } => {
+                ctx.notify();
+            }
         }
     }
 
@@ -12375,6 +12378,7 @@ impl Workspace {
         let current_name = folder.name.clone();
         self.folder_being_renamed = Some(folder_id);
         self.folder_rename_editor.update(ctx, |editor, ctx| {
+            editor.set_font_size(14., ctx);
             editor.clear_buffer_and_reset_undo_stack(ctx);
             editor.insert_selected_text(&current_name, ctx);
         });
@@ -12513,6 +12517,20 @@ impl Workspace {
         let pos = position_in_sidebar.min(self.sidebar_layout.len());
         self.sidebar_layout.insert(pos, SidebarItem::Tab(tab_id));
         ctx.notify();
+    }
+
+    fn handle_tab_drop_on_top_level(
+        &mut self,
+        tab_id: LocalTabId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let in_folder = self.sidebar_layout.iter().any(|item| match item {
+            SidebarItem::Folder { children, .. } => children.contains(&tab_id),
+            SidebarItem::Tab(_) => false,
+        });
+        if in_folder {
+            self.move_tab_out_of_folder(tab_id, self.sidebar_layout.len(), ctx);
+        }
     }
 
     fn reorder_sidebar_tab(
@@ -20942,6 +20960,15 @@ impl TypedActionView for Workspace {
             return;
         }
 
+        if self.folder_being_renamed.is_some()
+            && !matches!(
+                action,
+                RenameTabFolder { .. } | SetTabFolderName { .. }
+            )
+        {
+            self.finish_folder_rename(ctx);
+        }
+
         match action {
             ActivateTab(index) => self.activate_tab(*index, ctx),
             ActivateTabByNumber(num) => self.activate_tab(num.saturating_sub(1), ctx),
@@ -20983,6 +21010,7 @@ impl TypedActionView for Workspace {
                 tab_id,
                 position_in_sidebar,
             } => self.move_tab_out_of_folder(*tab_id, *position_in_sidebar, ctx),
+            HandleTabDropOnTopLevel { tab_id } => self.handle_tab_drop_on_top_level(*tab_id, ctx),
             ReorderSidebarTab {
                 tab_id,
                 target_position,

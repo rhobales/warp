@@ -720,6 +720,9 @@ pub enum WorkspaceAction {
         tab_id: LocalTabId,
         position_in_sidebar: usize,
     },
+    HandleTabDropOnTopLevel {
+        tab_id: LocalTabId,
+    },
     ReorderSidebarTab {
         tab_id: LocalTabId,
         target_position: usize,
@@ -827,6 +830,7 @@ impl WorkspaceAction {
             | SetTabFolderColor { .. }
             | MoveTabIntoFolder { .. }
             | MoveTabOutOfFolder { .. }
+            | HandleTabDropOnTopLevel { .. }
             | ReorderSidebarTab { .. }
             | ReorderSidebarFolder { .. }
             | ToggleVerticalTabsPanel => true, // actions that actually change a state of the state of user's

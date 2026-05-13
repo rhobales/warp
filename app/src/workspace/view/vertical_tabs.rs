@@ -2268,9 +2268,8 @@ fn render_tab_group_internal(
             });
         })
         .with_accepted_by_drop_target_fn(|target, _app| {
-            if target
-                .as_any()
-                .is::<VerticalTabsFolderDropTargetData>()
+            if target.as_any().is::<VerticalTabsFolderDropTargetData>()
+                || target.as_any().is::<VerticalTabsPaneDropTargetData>()
             {
                 AcceptedByDropTarget::Yes
             } else {
@@ -2279,8 +2278,9 @@ fn render_tab_group_internal(
         })
         .on_drop(move |ctx, _, _, drop_target| {
             if let Some(target) = drop_target {
-                if let Some(folder_target) =
-                    target.as_any().downcast_ref::<VerticalTabsFolderDropTargetData>()
+                if let Some(folder_target) = target
+                    .as_any()
+                    .downcast_ref::<VerticalTabsFolderDropTargetData>()
                 {
                     let position_in_folder = match folder_target.position {
                         FolderDropPosition::OnHeader => usize::MAX,
@@ -2294,6 +2294,9 @@ fn render_tab_group_internal(
                     return;
                 }
             }
+            ctx.dispatch_typed_action(WorkspaceAction::HandleTabDropOnTopLevel {
+                tab_id: tab_local_id,
+            });
             ctx.dispatch_typed_action(WorkspaceAction::DropTab);
         });
     // Only lock the drag to the vertical axis when cross-window tab drag is
@@ -6411,6 +6414,7 @@ fn render_folder_node(
     };
     let rename_editor_for_render = rename_editor.cloned();
     let count_text = format!("{child_count}");
+    let show_count = *TabSettings::as_ref(app).show_tab_count_in_folder_header.value();
 
     Hoverable::new(header_mouse_state, move |state| {
         let icon = if is_open {
@@ -6457,19 +6461,20 @@ fn render_folder_node(
             .finish();
             row = row.with_child(Shrinkable::new(1., editor_element).finish());
         } else {
-            row = row
-                .with_child(Shrinkable::new(
-                    1.,
-                    Text::new_inline(name.clone(), ui_font, 14.)
-                        .with_clip(ClipConfig::ellipsis())
-                        .with_color(theme_fg.into())
-                        .finish(),
-                ).finish())
-                .with_child(
+            row = row.with_child(Shrinkable::new(
+                1.,
+                Text::new_inline(name.clone(), ui_font, 14.)
+                    .with_clip(ClipConfig::ellipsis())
+                    .with_color(theme_fg.into())
+                    .finish(),
+            ).finish());
+            if show_count {
+                row = row.with_child(
                     Text::new_inline(count_text.clone(), ui_font, 12.)
                         .with_color(theme_sub.into())
                         .finish(),
                 );
+            }
         }
         let mut container = Container::new(row.finish())
             .with_background(bg)

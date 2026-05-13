@@ -55,9 +55,9 @@ use crate::window_settings::{
 use crate::workspace::header_toolbar_editor::HeaderToolbarInlineEditor;
 use crate::workspace::tab_settings::{
     DirectoryTabColor, PreserveActiveTabColor, ShowCodeReviewButton, ShowIndicatorsButton,
-    ShowVerticalTabPanelInRestoredWindows, TabCloseButtonPosition, TabSettings,
-    TabSettingsChangedEvent, UseLatestUserPromptAsConversationTitleInTabNames, UseVerticalTabs,
-    WorkspaceDecorationVisibility,
+    ShowTabCountInFolderHeader, ShowVerticalTabPanelInRestoredWindows, TabCloseButtonPosition,
+    TabSettings, TabSettingsChangedEvent, UseLatestUserPromptAsConversationTitleInTabNames,
+    UseVerticalTabs, WorkspaceDecorationVisibility,
 };
 use crate::workspace::WorkspaceAction;
 use crate::{editor::EditorView, themes::theme_chooser::ThemeChooserMode};
@@ -460,6 +460,7 @@ pub enum AppearancePageAction {
     ToggleShowCodeReviewButton,
     TogglePreserveActiveTabColor,
     ToggleVerticalTabs,
+    ToggleShowTabCountInFolderHeader,
     ToggleShowVerticalTabPanelInRestoredWindows,
     ToggleUseLatestUserPromptAsConversationTitleInTabNames,
     ToggleLigatureRendering,
@@ -599,6 +600,9 @@ impl TypedActionView for AppearanceSettingsPageView {
             ToggleShowCodeReviewButton => self.toggle_show_code_review_button(ctx),
             TogglePreserveActiveTabColor => self.toggle_preserve_active_tab_color(ctx),
             ToggleVerticalTabs => self.toggle_vertical_tabs(ctx),
+            ToggleShowTabCountInFolderHeader => {
+                self.toggle_show_tab_count_in_folder_header(ctx)
+            }
             ToggleShowVerticalTabPanelInRestoredWindows => {
                 self.toggle_show_vertical_tab_panel_in_restored_windows(ctx)
             }
@@ -1393,6 +1397,10 @@ impl AppearanceSettingsPageView {
             tab_settings_widgets.push(Box::new(
                 UseLatestUserPromptAsConversationTitleInTabNamesWidget::default(),
             ));
+            if FeatureFlag::TabFolders.is_enabled() {
+                tab_settings_widgets
+                    .push(Box::new(ShowTabCountInFolderHeaderWidget::default()));
+            }
             if FeatureFlag::ConfigurableToolbar.is_enabled() {
                 tab_settings_widgets.push(Box::new(EditToolbarWidget));
             }
@@ -2309,6 +2317,19 @@ impl AppearanceSettingsPageView {
             TelemetryEvent::TogglePreserveActiveTabColor { enabled: new_value },
             ctx
         );
+    }
+
+    fn toggle_show_tab_count_in_folder_header(&mut self, ctx: &mut ViewContext<Self>) {
+        let tab_settings = TabSettings::handle(ctx);
+        let new_value = !*tab_settings
+            .as_ref(ctx)
+            .show_tab_count_in_folder_header
+            .value();
+        ctx.update_model(&tab_settings, move |tab_settings, ctx| {
+            report_if_error!(tab_settings
+                .show_tab_count_in_folder_header
+                .set_value(new_value, ctx));
+        });
     }
 
     fn toggle_vertical_tabs(&mut self, ctx: &mut ViewContext<Self>) {
@@ -4556,6 +4577,52 @@ impl SettingsWidget for PreserveActiveTabColorWidget {
                 .build()
                 .on_click(move |ctx, _, _| {
                     ctx.dispatch_typed_action(AppearancePageAction::TogglePreserveActiveTabColor);
+                })
+                .finish(),
+            None,
+        )
+    }
+}
+
+#[derive(Default)]
+struct ShowTabCountInFolderHeaderWidget {
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for ShowTabCountInFolderHeaderWidget {
+    type View = AppearanceSettingsPageView;
+
+    fn search_terms(&self) -> &str {
+        "tab folder count sidebar"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let tab_settings = TabSettings::as_ref(app);
+        render_body_item::<AppearancePageAction>(
+            "Show tab count in folder header".into(),
+            None,
+            LocalOnlyIconState::for_setting(
+                ShowTabCountInFolderHeader::storage_key(),
+                ShowTabCountInFolderHeader::sync_to_cloud(),
+                &mut view.local_only_icon_tooltip_states.borrow_mut(),
+                app,
+            ),
+            ToggleState::Enabled,
+            appearance,
+            appearance
+                .ui_builder()
+                .switch(self.switch_state.clone())
+                .check(*tab_settings.show_tab_count_in_folder_header)
+                .build()
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(
+                        AppearancePageAction::ToggleShowTabCountInFolderHeader,
+                    );
                 })
                 .finish(),
             None,
