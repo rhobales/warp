@@ -1227,7 +1227,12 @@ fn test_reopen_closed_shared_tab() {
             assert_eq!(workspace.tab_count(), 2);
 
             // Restore the shared tab.
-            workspace.restore_closed_tab(1, TabData::new(shared_pane_group.to_owned()), ctx);
+            let local_tab_id = workspace.allocate_local_tab_id();
+            workspace.restore_closed_tab(
+                1,
+                TabData::new(shared_pane_group.to_owned(), local_tab_id),
+                ctx,
+            );
         });
         // Restored tab should no longer be shared.
         workspace.read(&app, |workspace, ctx| {

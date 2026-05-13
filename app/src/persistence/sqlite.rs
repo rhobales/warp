@@ -73,8 +73,9 @@ use crate::ai::persisted_workspace::EnablementState;
 use crate::app_state::{
     AIFactPaneSnapshot, AmbientAgentPaneSnapshot, CodeReviewPaneSnapshot,
     EnvVarCollectionPaneSnapshot, LeftPanelSnapshot, RightPanelSnapshot, SettingsPaneSnapshot,
-    WorkflowPaneSnapshot,
+    SidebarItemSnapshot, TabFolderSnapshot, WorkflowPaneSnapshot,
 };
+use crate::tab_folder::LocalFolderId;
 use crate::auth::auth_manager::PersistedCurrentUserInformation;
 use crate::auth::auth_state::AuthStateProvider;
 use crate::auth::UserUid;
@@ -102,7 +103,7 @@ use crate::server::telemetry::TelemetryEvent;
 use crate::settings::cloud_preferences::{CloudPreference, CloudPreferenceModel};
 use crate::settings_view::SettingsSection;
 use crate::suggestions::ignored_suggestions_model::SuggestionType;
-use crate::tab::SelectedTabColor;
+use crate::tab::{LocalTabId, SelectedTabColor};
 use crate::terminal::history::PersistedCommand;
 use crate::terminal::ShellLaunchData;
 use crate::themes::theme::AnsiColorIdentifier;
@@ -888,6 +889,7 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
         diesel::delete(schema::pane_branches::dsl::pane_branches).execute(conn)?;
         diesel::delete(schema::pane_nodes::dsl::pane_nodes).execute(conn)?;
         diesel::delete(schema::tabs::dsl::tabs).execute(conn)?;
+        diesel::delete(schema::tab_folders::dsl::tab_folders).execute(conn)?;
         diesel::delete(schema::windows::dsl::windows).execute(conn)?;
         diesel::delete(schema::active_mcp_servers::dsl::active_mcp_servers).execute(conn)?;
         diesel::delete(schema::panels::dsl::panels).execute(conn)?;
@@ -950,19 +952,78 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                 active_window_id = Some(window_id)
             }
 
+            let mut tab_folder_db_id: HashMap<LocalFolderId, i32> = HashMap::new();
+            for (top_level_index, item) in window.sidebar_layout.iter().enumerate() {
+                let SidebarItemSnapshot::Folder { id: folder_local_id, .. } = item else {
+                    continue;
+                };
+                let Some(folder_snapshot) = window
+                    .tab_folders
+                    .iter()
+                    .find(|f| f.id == *folder_local_id)
+                else {
+                    continue;
+                };
+                let new_folder = model::NewTabFolder {
+                    window_id,
+                    local_folder_id: folder_snapshot.id.0 as i32,
+                    name: folder_snapshot.name.clone(),
+                    color: match folder_snapshot.color {
+                        SelectedTabColor::Unset => None,
+                        _ => serde_yaml::to_string(&folder_snapshot.color).ok(),
+                    },
+                    is_open: folder_snapshot.is_open,
+                    sidebar_position: top_level_index as i32,
+                };
+                diesel::insert_into(schema::tab_folders::dsl::tab_folders)
+                    .values(new_folder)
+                    .execute(conn)?;
+                let inserted_id: i32 = schema::tab_folders::dsl::tab_folders
+                    .select(schema::tab_folders::columns::id)
+                    .order(schema::tab_folders::columns::id.desc())
+                    .first(conn)?;
+                tab_folder_db_id.insert(folder_snapshot.id, inserted_id);
+            }
+
+            let mut tab_sidebar_metadata: HashMap<LocalTabId, (Option<i32>, i32)> = HashMap::new();
+            for (top_level_index, item) in window.sidebar_layout.iter().enumerate() {
+                match item {
+                    SidebarItemSnapshot::Tab(local_id) => {
+                        tab_sidebar_metadata.insert(*local_id, (None, top_level_index as i32));
+                    }
+                    SidebarItemSnapshot::Folder { id, children } => {
+                        let folder_db_id = tab_folder_db_id.get(id).copied();
+                        for (child_index, child) in children.iter().enumerate() {
+                            tab_sidebar_metadata
+                                .insert(*child, (folder_db_id, child_index as i32));
+                        }
+                    }
+                }
+            }
+
             let tabs: Vec<NewTab> = window
                 .tabs
                 .iter()
-                .map(|tab| NewTab {
-                    window_id,
-                    custom_title: tab.custom_title.clone(),
-                    // We only persist and restore the selected color here
-                    // (the default color based on the pwd is separately persisted and then applied on-restore)
-                    color: match tab.selected_color {
-                        // Keep the column NULL for the common no-override case
-                        SelectedTabColor::Unset => None,
-                        _ => serde_yaml::to_string(&tab.selected_color).ok(),
-                    },
+                .enumerate()
+                .map(|(tab_index, tab)| {
+                    let (folder_id, sidebar_position) = tab
+                        .local_tab_id
+                        .and_then(|id| tab_sidebar_metadata.get(&id).copied())
+                        .unwrap_or((None, tab_index as i32));
+                    NewTab {
+                        window_id,
+                        custom_title: tab.custom_title.clone(),
+                        // We only persist and restore the selected color here
+                        // (the default color based on the pwd is separately persisted and then applied on-restore)
+                        color: match tab.selected_color {
+                            // Keep the column NULL for the common no-override case
+                            SelectedTabColor::Unset => None,
+                            _ => serde_yaml::to_string(&tab.selected_color).ok(),
+                        },
+                        local_tab_id: tab.local_tab_id.map(|id| id.0 as i32),
+                        folder_id,
+                        sidebar_position,
+                    }
                 })
                 .collect();
 
@@ -2729,6 +2790,11 @@ fn read_sqlite_data(
         .load::<Tab>(conn)?
         .grouped_by(&db_windows);
 
+    let db_tab_folders = model::TabFolder::belonging_to(&db_windows)
+        .order_by(schema::tab_folders::columns::sidebar_position.asc())
+        .load::<model::TabFolder>(conn)?
+        .grouped_by(&db_windows);
+
     let db_panels = schema::panels::dsl::panels
         .load::<model::Panel>(conn)?
         .into_iter()
@@ -2739,7 +2805,81 @@ fn read_sqlite_data(
         .into_iter()
         .enumerate()
         .zip(db_tabs)
-        .map(|((idx, window), tabs_for_window)| {
+        .zip(db_tab_folders)
+        .map(|(((idx, window), tabs_for_window), folders_for_window)| {
+            let tab_folder_snapshots: Vec<TabFolderSnapshot> = folders_for_window
+                .iter()
+                .map(|f| TabFolderSnapshot {
+                    id: LocalFolderId(f.local_folder_id as u32),
+                    name: f.name.clone(),
+                    color: f
+                        .color
+                        .as_deref()
+                        .and_then(|s| serde_yaml::from_str::<SelectedTabColor>(s).ok())
+                        .unwrap_or_default(),
+                    is_open: f.is_open,
+                })
+                .collect();
+
+            let folder_db_to_local: HashMap<i32, LocalFolderId> = folders_for_window
+                .iter()
+                .map(|f| (f.id, LocalFolderId(f.local_folder_id as u32)))
+                .collect();
+
+            let mut top_level_items: Vec<(i32, SidebarItemSnapshot)> = Vec::new();
+            for folder in &folders_for_window {
+                top_level_items.push((
+                    folder.sidebar_position,
+                    SidebarItemSnapshot::Folder {
+                        id: LocalFolderId(folder.local_folder_id as u32),
+                        children: Vec::new(),
+                    },
+                ));
+            }
+            let mut folder_children: HashMap<LocalFolderId, Vec<(i32, LocalTabId)>> = HashMap::new();
+            for tab in &tabs_for_window {
+                let Some(local_id) = tab.local_tab_id.map(|raw| LocalTabId(raw as u32)) else {
+                    continue;
+                };
+                match tab.folder_id.and_then(|fid| folder_db_to_local.get(&fid).copied()) {
+                    Some(folder_local_id) => {
+                        folder_children
+                            .entry(folder_local_id)
+                            .or_default()
+                            .push((tab.sidebar_position, local_id));
+                    }
+                    None => {
+                        top_level_items
+                            .push((tab.sidebar_position, SidebarItemSnapshot::Tab(local_id)));
+                    }
+                }
+            }
+            top_level_items.sort_by_key(|(pos, _)| *pos);
+            for children in folder_children.values_mut() {
+                children.sort_by_key(|(pos, _)| *pos);
+            }
+            let sidebar_layout: Vec<SidebarItemSnapshot> = top_level_items
+                .into_iter()
+                .map(|(_, item)| match item {
+                    SidebarItemSnapshot::Tab(tab_local_id) => SidebarItemSnapshot::Tab(tab_local_id),
+                    SidebarItemSnapshot::Folder {
+                        id: folder_local_id,
+                        ..
+                    } => {
+                        let children = folder_children
+                            .remove(&folder_local_id)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|(_, tab_id)| tab_id)
+                            .collect();
+                        SidebarItemSnapshot::Folder {
+                            id: folder_local_id,
+                            children,
+                        }
+                    }
+                })
+                .collect();
+
             let saved_tabs: Vec<_> = tabs_for_window
                 .into_iter()
                 .filter_map(|tab| {
@@ -2755,6 +2895,7 @@ fn read_sqlite_data(
                         .and_then(|s| serde_json::from_str::<RightPanelSnapshot>(s).ok());
 
                     Some(TabSnapshot {
+                        local_tab_id: tab.local_tab_id.map(|raw| LocalTabId(raw as u32)),
                         root,
                         custom_title: tab.custom_title,
                         default_directory_color: None,
@@ -2844,6 +2985,8 @@ fn read_sqlite_data(
 
             WindowSnapshot {
                 tabs: saved_tabs,
+                tab_folders: tab_folder_snapshots,
+                sidebar_layout,
                 active_tab_index: tab_index,
                 quake_mode: window.quake_mode,
                 bounds,

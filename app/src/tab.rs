@@ -75,6 +75,12 @@ const COMPACT_TAB_WIDTH_THRESHOLD: f32 = 42.0;
 // Horizontal inset for the tab close button
 const TAB_CLOSE_BUTTON_HORIZONTAL_INSET: f32 = 2.0;
 
+/// Stable per-window identifier for a tab. Survives reorders, drag&drop,
+/// folder moves and persistence. Distinct from the in-memory `EntityId`
+/// of the underlying `PaneGroup`, which is reassigned on every restart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LocalTabId(pub u32);
+
 /// Represents the user's manual tab-color selection state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SelectedTabColor {
@@ -134,6 +140,7 @@ pub struct PaneNameMenuTarget {
 #[derive(Clone)]
 pub struct TabData {
     pub pane_group: ViewHandle<PaneGroup>,
+    pub local_tab_id: LocalTabId,
     pub tab_mouse_state: MouseStateHandle,
     pub close_mouse_state: MouseStateHandle,
     pub tooltip_mouse_state: MouseStateHandle,
@@ -151,9 +158,10 @@ const TAB_COLOR_ICON_PATH: &str = "bundled/svg/ellipse.svg";
 const TAB_NO_COLOR_ICON_PATH: &str = "bundled/svg/no_color_ellipse.svg";
 
 impl TabData {
-    pub fn new(pane_group: ViewHandle<PaneGroup>) -> Self {
+    pub fn new(pane_group: ViewHandle<PaneGroup>, local_tab_id: LocalTabId) -> Self {
         Self {
             pane_group,
+            local_tab_id,
             tab_mouse_state: Default::default(),
             close_mouse_state: Default::default(),
             tooltip_mouse_state: Default::default(),
@@ -433,6 +441,16 @@ impl TabData {
                 })
                 .with_on_select_action(WorkspaceAction::MoveTabRight(index))
                 .into_item(),
+            );
+        }
+        if uses_vertical_tabs && FeatureFlag::TabFolders.is_enabled() {
+            menu_items.push(
+                MenuItemFields::new("New folder")
+                    .with_on_select_action(WorkspaceAction::CreateTabFolder {
+                        initial_name: "New Folder".to_string(),
+                        position_in_sidebar: usize::MAX,
+                    })
+                    .into_item(),
             );
         }
         if index != 0 {

@@ -745,6 +745,10 @@ pub enum FeatureFlag {
     /// Enables vertical tab layout as an alternative to the horizontal tab bar.
     VerticalTabs,
 
+    /// Enables grouping local terminal tabs into named, colored folders in the
+    /// vertical tabs sidebar.
+    TabFolders,
+
     /// Enables attaching code review comments, diff hunk, and attach as context
     /// from code review + code editor for House Of Agents work
     HoaCodeReview,
@@ -936,6 +940,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::CloudModeInputV2,
     FeatureFlag::HandoffLocalCloud,
     FeatureFlag::DragTabsToWindows,
+    FeatureFlag::TabFolders,
     FeatureFlag::OrchestrationLaunchModal,
     FeatureFlag::NamedAgents,
     FeatureFlag::HandoffCloudCloud,

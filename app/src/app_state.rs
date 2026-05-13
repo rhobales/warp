@@ -17,7 +17,8 @@ use crate::drive::OpenWarpDriveObjectSettings;
 use crate::root_view::quake_mode_window_id;
 use crate::server::ids::SyncId;
 use crate::settings_view::{environments_page::EnvironmentsPage, SettingsSection};
-use crate::tab::SelectedTabColor;
+use crate::tab::{LocalTabId, SelectedTabColor};
+use crate::tab_folder::LocalFolderId;
 use crate::terminal::ShellLaunchData;
 use crate::themes::theme::AnsiColorIdentifier;
 use crate::workspace::view::left_panel::ToolPanelView;
@@ -44,6 +45,8 @@ pub struct PersistedAgentManagementFilters {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowSnapshot {
     pub tabs: Vec<TabSnapshot>,
+    pub tab_folders: Vec<TabFolderSnapshot>,
+    pub sidebar_layout: Vec<SidebarItemSnapshot>,
     pub active_tab_index: usize,
     pub bounds: Option<RectF>,
     pub fullscreen_state: FullscreenState,
@@ -60,7 +63,25 @@ pub struct WindowSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct TabFolderSnapshot {
+    pub id: LocalFolderId,
+    pub name: String,
+    pub color: SelectedTabColor,
+    pub is_open: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SidebarItemSnapshot {
+    Tab(LocalTabId),
+    Folder {
+        id: LocalFolderId,
+        children: Vec<LocalTabId>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct TabSnapshot {
+    pub local_tab_id: Option<LocalTabId>,
     pub custom_title: Option<String>,
     pub root: PaneNodeSnapshot,
     pub default_directory_color: Option<AnsiColorIdentifier>,

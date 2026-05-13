@@ -1567,6 +1567,18 @@ pub struct VerticalTabsPaneDropTargetData {
     pub tab_hover_index: TabBarHoverIndex,
 }
 
+#[derive(PartialEq, Copy, Clone, Debug)]
+pub struct VerticalTabsFolderDropTargetData {
+    pub folder_id: crate::tab_folder::LocalFolderId,
+    pub position: FolderDropPosition,
+}
+
+#[derive(PartialEq, Copy, Clone, Debug)]
+pub enum FolderDropPosition {
+    OnHeader,
+    BeforeChild(usize),
+}
+
 #[derive(PartialEq, Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum TabBarLocation {
     TabIndex(usize),
@@ -1580,6 +1592,12 @@ impl DropTargetData for TabBarDropTargetData {
 }
 
 impl DropTargetData for VerticalTabsPaneDropTargetData {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl DropTargetData for VerticalTabsFolderDropTargetData {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

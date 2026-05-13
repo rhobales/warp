@@ -77,6 +77,7 @@ mod shell_indicator;
 mod suggestions;
 mod system;
 mod tab;
+mod tab_folder;
 #[cfg(test)]
 mod test_util;
 mod throttle;

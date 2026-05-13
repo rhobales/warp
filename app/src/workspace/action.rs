@@ -21,7 +21,8 @@ use crate::server::telemetry::{
     AddTabWithShellSource, AgentModeEntrypoint, PaletteSource, SharingDialogSource,
 };
 use crate::settings_view::{SettingsAction as SettingsTabAction, SettingsSection};
-use crate::tab::{NewSessionMenuItem, SelectedTabColor};
+use crate::tab::{LocalTabId, NewSessionMenuItem, SelectedTabColor};
+use crate::tab_folder::LocalFolderId;
 use crate::tab_configs::TabConfig;
 use crate::terminal::available_shells::AvailableShell;
 use crate::terminal::view::inline_banner::ZeroStatePromptSuggestionType;
@@ -684,6 +685,45 @@ pub enum WorkspaceAction {
     /// Opens (or focuses) the in-app network log pane as a right-split of the
     /// active pane group. Gated on `ContextFlag::NetworkLogConsole`.
     OpenNetworkLogPane,
+
+    CreateTabFolder {
+        initial_name: String,
+        position_in_sidebar: usize,
+    },
+    RenameTabFolder {
+        folder_id: LocalFolderId,
+    },
+    SetTabFolderName {
+        folder_id: LocalFolderId,
+        name: String,
+    },
+    ToggleTabFolderOpen {
+        folder_id: LocalFolderId,
+    },
+    DeleteTabFolder {
+        folder_id: LocalFolderId,
+    },
+    SetTabFolderColor {
+        folder_id: LocalFolderId,
+        color: SelectedTabColor,
+    },
+    MoveTabIntoFolder {
+        tab_id: LocalTabId,
+        folder_id: LocalFolderId,
+        position_in_folder: usize,
+    },
+    MoveTabOutOfFolder {
+        tab_id: LocalTabId,
+        position_in_sidebar: usize,
+    },
+    ReorderSidebarTab {
+        tab_id: LocalTabId,
+        target_position: usize,
+    },
+    ReorderSidebarFolder {
+        folder_id: LocalFolderId,
+        target_position: usize,
+    },
 }
 
 impl From<&WorkspaceAction> for LoginGatedFeature {
@@ -775,6 +815,16 @@ impl WorkspaceAction {
             | SummarizeAIConversation { .. }
             | OpenRepository { .. }
             | SelectTabConfig(_)
+            | CreateTabFolder { .. }
+            | RenameTabFolder { .. }
+            | SetTabFolderName { .. }
+            | ToggleTabFolderOpen { .. }
+            | DeleteTabFolder { .. }
+            | SetTabFolderColor { .. }
+            | MoveTabIntoFolder { .. }
+            | MoveTabOutOfFolder { .. }
+            | ReorderSidebarTab { .. }
+            | ReorderSidebarFolder { .. }
             | ToggleVerticalTabsPanel => true, // actions that actually change a state of the state of user's
             // workspace would most likely require a save, so that if the app gets
             // restarted, the user can continue working

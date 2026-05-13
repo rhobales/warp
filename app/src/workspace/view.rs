@@ -83,8 +83,8 @@ use crate::ai::{
 use crate::ai_assistant::execution_context::WarpAiExecutionContext;
 use crate::app_state::{
     LeafContents, LeafSnapshot, LeftPanelDisplayedTab, LeftPanelSnapshot, NotebookPaneSnapshot,
-    PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SettingsPaneSnapshot, TabSnapshot,
-    TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot,
+    PaneNodeSnapshot, PaneUuid, RightPanelSnapshot, SettingsPaneSnapshot, SidebarItemSnapshot,
+    TabFolderSnapshot, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot, WorkflowPaneSnapshot,
 };
 use crate::code::buffer_location::FileLocation;
 use crate::code_review::diff_state::DiffStateModel;
@@ -488,9 +488,11 @@ use crate::palette::PaletteMode;
 use crate::search::command_palette::view::{Event as CommandPaletteEvent, View as CommandPalette};
 use crate::server::telemetry::{NotificationsTurnedOnSource, PaletteSource, TabRenameEvent};
 use crate::tab::{
-    tab_position_id, uses_vertical_tabs, NewSessionMenuItem, PaneNameMenuTarget, SelectedTabColor,
-    TabBarState, TabComponent, TabData, TabTelemetryAction, TAB_BAR_BORDER_HEIGHT,
+    tab_position_id, uses_vertical_tabs, LocalTabId, NewSessionMenuItem, PaneNameMenuTarget,
+    SelectedTabColor, TabBarState, TabComponent, TabData, TabTelemetryAction,
+    TAB_BAR_BORDER_HEIGHT,
 };
+use crate::tab_folder::{LocalFolderId, SidebarItem, TabFolderData};
 use crate::terminal::view::ssh_file_upload::FileUploadId;
 use crate::ui_components::icons;
 use crate::TelemetryEvent;
@@ -923,6 +925,10 @@ pub struct TransferredTab {
 pub struct Workspace {
     window_id: WindowId,
     pub(crate) tabs: Vec<TabData>,
+    pub(crate) next_local_tab_id: u32,
+    pub(crate) tab_folders: HashMap<LocalFolderId, TabFolderData>,
+    pub(crate) sidebar_layout: Vec<SidebarItem>,
+    pub(crate) next_local_folder_id: u32,
     active_tab_index: usize,
     /// Tracks tab activation order (most-recently-used first).
     /// Each entry is the `pane_group.id()` of the corresponding tab.
@@ -3092,6 +3098,10 @@ impl Workspace {
 
         let mut ws = Self {
             tabs: Vec::new(),
+            next_local_tab_id: 0,
+            tab_folders: HashMap::new(),
+            sidebar_layout: Vec::new(),
+            next_local_folder_id: 0,
             active_tab_index: 0,
             tab_mru_order: Vec::new(),
             hovered_tab_index: None,
@@ -3629,6 +3639,9 @@ impl Workspace {
                         self.tabs[tab_index].default_directory_color =
                             saved_tab.default_directory_color;
                         self.tabs[tab_index].selected_color = saved_tab.selected_color;
+                        if let Some(saved_id) = saved_tab.local_tab_id {
+                            self.tabs[tab_index].local_tab_id = saved_id;
+                        }
 
                         let pane_group = self.tabs[tab_index].pane_group.clone();
 
@@ -3644,6 +3657,60 @@ impl Workspace {
                             );
                         }
                     });
+
+                let max_restored_id = self
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.local_tab_id.0)
+                    .max()
+                    .unwrap_or(0);
+                self.next_local_tab_id = max_restored_id.wrapping_add(1);
+
+                self.tab_folders = window_snapshot
+                    .tab_folders
+                    .iter()
+                    .map(|f| {
+                        let mut data = TabFolderData::new(f.id, f.name.clone());
+                        data.color = f.color;
+                        data.is_open = f.is_open;
+                        (f.id, data)
+                    })
+                    .collect();
+                self.sidebar_layout = window_snapshot
+                    .sidebar_layout
+                    .iter()
+                    .map(|item| match item {
+                        SidebarItemSnapshot::Tab(id) => SidebarItem::Tab(*id),
+                        SidebarItemSnapshot::Folder { id, children } => SidebarItem::Folder {
+                            id: *id,
+                            children: children.clone(),
+                        },
+                    })
+                    .collect();
+                let mut included: HashSet<LocalTabId> = HashSet::new();
+                for item in &self.sidebar_layout {
+                    match item {
+                        SidebarItem::Tab(id) => {
+                            included.insert(*id);
+                        }
+                        SidebarItem::Folder { children, .. } => {
+                            included.extend(children.iter().copied());
+                        }
+                    }
+                }
+                for tab in &self.tabs {
+                    if !included.contains(&tab.local_tab_id) {
+                        self.sidebar_layout
+                            .push(SidebarItem::Tab(tab.local_tab_id));
+                    }
+                }
+                let max_folder_id = self
+                    .tab_folders
+                    .keys()
+                    .map(|id| id.0)
+                    .max()
+                    .unwrap_or(0);
+                self.next_local_folder_id = max_folder_id.wrapping_add(1);
 
                 if self.tab_count() == 0 {
                     if self.should_trigger_get_started_onboarding(ctx) {
@@ -3997,7 +4064,8 @@ impl Workspace {
             me.handle_file_tree_event(pane_group, event, ctx)
         });
 
-        self.tabs.push(TabData::new(new_pane_group));
+        let local_tab_id = self.allocate_local_tab_id();
+        self.tabs.push(TabData::new(new_pane_group, local_tab_id));
         self.activate_tab_internal(self.tab_count() - 1, ctx);
     }
 
@@ -4071,7 +4139,9 @@ impl Workspace {
             me.handle_file_tree_event(pane_group, event, ctx)
         });
 
-        self.tabs.push(TabData::new(new_pane_group.clone()));
+        let local_tab_id = self.allocate_local_tab_id();
+        self.tabs
+            .push(TabData::new(new_pane_group.clone(), local_tab_id));
         let new_tab_index = self.tab_count() - 1;
         self.tab_mru_order
             .push(self.tabs[new_tab_index].pane_group.id());
@@ -4773,6 +4843,18 @@ impl Workspace {
 
     pub fn active_tab_index(&self) -> usize {
         self.active_tab_index
+    }
+
+    pub(crate) fn allocate_local_tab_id(&mut self) -> LocalTabId {
+        let id = LocalTabId(self.next_local_tab_id);
+        self.next_local_tab_id = self.next_local_tab_id.wrapping_add(1);
+        id
+    }
+
+    pub(crate) fn allocate_local_folder_id(&mut self) -> LocalFolderId {
+        let id = LocalFolderId(self.next_local_folder_id);
+        self.next_local_folder_id = self.next_local_folder_id.wrapping_add(1);
+        id
     }
 
     pub fn is_overflow_menu_showing(&self) -> bool {
@@ -9974,7 +10056,7 @@ impl Workspace {
         } else {
             None
         };
-        let tabs = self
+        let tabs: Vec<TabSnapshot> = self
             .tab_views()
             .enumerate()
             .filter(|(tab_index, _)| Some(*tab_index) != transferred_tab_index)
@@ -10003,6 +10085,7 @@ impl Workspace {
                 let right_panel =
                     self.compute_right_panel_snapshot(pane_group_view, right_panel_width, app);
                 TabSnapshot {
+                    local_tab_id: self.tabs.get(tab_index).map(|tab| tab.local_tab_id),
                     root,
                     custom_title: pane_group.custom_title(app),
                     default_directory_color: self
@@ -10084,8 +10167,13 @@ impl Workspace {
                 .read(app, |view, _| view.get_filters()),
         );
 
+        let tab_folders = self.snapshot_tab_folders();
+        let sidebar_layout = self.snapshot_sidebar_layout(&tabs);
+
         WindowSnapshot {
             tabs,
+            tab_folders,
+            sidebar_layout,
             active_tab_index,
             bounds: window_bounds,
             fullscreen_state: window_fullscreen_state,
@@ -10100,6 +10188,62 @@ impl Workspace {
             right_panel_width,
             agent_management_filters,
         }
+    }
+
+    fn snapshot_tab_folders(&self) -> Vec<TabFolderSnapshot> {
+        self.sidebar_layout
+            .iter()
+            .filter_map(|item| match item {
+                SidebarItem::Folder { id, .. } => self.tab_folders.get(id).map(|f| TabFolderSnapshot {
+                    id: f.id,
+                    name: f.name.clone(),
+                    color: f.color,
+                    is_open: f.is_open,
+                }),
+                SidebarItem::Tab(_) => None,
+            })
+            .collect()
+    }
+
+    fn snapshot_sidebar_layout(&self, persisted_tabs: &[TabSnapshot]) -> Vec<SidebarItemSnapshot> {
+        let persisted_ids: HashSet<LocalTabId> = persisted_tabs
+            .iter()
+            .filter_map(|t| t.local_tab_id)
+            .collect();
+        let mut included_ids: HashSet<LocalTabId> = HashSet::new();
+        let mut layout: Vec<SidebarItemSnapshot> = self
+            .sidebar_layout
+            .iter()
+            .filter_map(|item| match item {
+                SidebarItem::Tab(id) if persisted_ids.contains(id) => {
+                    included_ids.insert(*id);
+                    Some(SidebarItemSnapshot::Tab(*id))
+                }
+                SidebarItem::Tab(_) => None,
+                SidebarItem::Folder { id, children } => {
+                    let filtered: Vec<LocalTabId> = children
+                        .iter()
+                        .copied()
+                        .filter(|c| persisted_ids.contains(c))
+                        .inspect(|c| {
+                            included_ids.insert(*c);
+                        })
+                        .collect();
+                    Some(SidebarItemSnapshot::Folder {
+                        id: *id,
+                        children: filtered,
+                    })
+                }
+            })
+            .collect();
+        for tab_snapshot in persisted_tabs {
+            if let Some(local_id) = tab_snapshot.local_tab_id {
+                if !included_ids.contains(&local_id) {
+                    layout.push(SidebarItemSnapshot::Tab(local_id));
+                }
+            }
+        }
+        layout
     }
 
     fn compute_left_panel_snapshot(
@@ -10383,6 +10527,7 @@ impl Workspace {
 
         let removed_pane_group_id = tab_data.pane_group.id();
         self.tab_mru_order.retain(|id| *id != removed_pane_group_id);
+        self.remove_tab_from_sidebar_layout(tab_data.local_tab_id);
 
         // Re-adopted child tabs leave no useful tab contents to restore; the
         // live pane already moved back.
@@ -11007,10 +11152,11 @@ impl Workspace {
         });
 
         let new_tab_placement_setting = TabSettings::as_ref(ctx).new_tab_placement;
+        let local_tab_id = self.allocate_local_tab_id();
 
         match new_tab_placement_setting {
             NewTabPlacement::AfterAllTabs => {
-                self.tabs.push(TabData::new(new_pane_group));
+                self.tabs.push(TabData::new(new_pane_group, local_tab_id));
                 self.tab_mru_order
                     .push(self.tabs.last().unwrap().pane_group.id());
                 self.activate_tab_internal(self.tab_count() - 1, ctx);
@@ -11018,13 +11164,14 @@ impl Workspace {
             // Add tab after current tab
             _ => {
                 if self.tab_count() == 0 {
-                    self.tabs.push(TabData::new(new_pane_group));
+                    self.tabs.push(TabData::new(new_pane_group, local_tab_id));
                     self.tab_mru_order
                         .push(self.tabs.last().unwrap().pane_group.id());
                     self.activate_tab_internal(self.tab_count() - 1, ctx);
                 } else {
                     let insert_idx = self.active_tab_index + 1;
-                    self.tabs.insert(insert_idx, TabData::new(new_pane_group));
+                    self.tabs
+                        .insert(insert_idx, TabData::new(new_pane_group, local_tab_id));
                     self.tab_mru_order
                         .push(self.tabs[insert_idx].pane_group.id());
                     self.activate_tab_internal(insert_idx, ctx);
@@ -11089,13 +11236,15 @@ impl Workspace {
             me.handle_file_tree_event(pane_group, event, ctx)
         });
 
+        let local_tab_id = self.allocate_local_tab_id();
         if self.tab_count() == 0 {
-            self.tabs.push(TabData::new(new_pane_group));
+            self.tabs.push(TabData::new(new_pane_group, local_tab_id));
             self.tab_mru_order
                 .push(self.tabs.last().unwrap().pane_group.id());
             self.activate_tab_internal(self.tab_count() - 1, ctx);
         } else {
-            self.tabs.insert(new_idx, TabData::new(new_pane_group));
+            self.tabs
+                .insert(new_idx, TabData::new(new_pane_group, local_tab_id));
             self.tab_mru_order.push(self.tabs[new_idx].pane_group.id());
             self.activate_tab_internal(new_idx, ctx);
         }
@@ -11631,7 +11780,9 @@ impl Workspace {
             me.handle_file_tree_event(pane_group, event, ctx)
         });
 
-        self.tabs.push(TabData::new(new_pane_group.clone()));
+        let local_tab_id = self.allocate_local_tab_id();
+        self.tabs
+            .push(TabData::new(new_pane_group.clone(), local_tab_id));
         let new_tab_index = self.tab_count() - 1;
         self.activate_tab_internal(new_tab_index, ctx);
 
@@ -12093,6 +12244,175 @@ impl Workspace {
             send_telemetry_from_ctx!(TelemetryEvent::MoveTab { direction }, ctx);
         }
 
+        ctx.notify();
+    }
+
+    fn create_tab_folder(
+        &mut self,
+        name: String,
+        position_in_sidebar: usize,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let id = self.allocate_local_folder_id();
+        self.tab_folders
+            .insert(id, TabFolderData::new(id, name));
+        let position = position_in_sidebar.min(self.sidebar_layout.len());
+        self.sidebar_layout.insert(
+            position,
+            SidebarItem::Folder {
+                id,
+                children: Vec::new(),
+            },
+        );
+        ctx.notify();
+    }
+
+    fn rename_tab_folder(&mut self, _folder_id: LocalFolderId, ctx: &mut ViewContext<Self>) {
+        ctx.notify();
+    }
+
+    fn set_tab_folder_name(
+        &mut self,
+        folder_id: LocalFolderId,
+        name: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(folder) = self.tab_folders.get_mut(&folder_id) {
+            folder.name = name;
+        }
+        ctx.notify();
+    }
+
+    fn toggle_tab_folder_open(&mut self, folder_id: LocalFolderId, ctx: &mut ViewContext<Self>) {
+        if let Some(folder) = self.tab_folders.get_mut(&folder_id) {
+            folder.is_open = !folder.is_open;
+        }
+        ctx.notify();
+    }
+
+    fn set_tab_folder_color(
+        &mut self,
+        folder_id: LocalFolderId,
+        color: SelectedTabColor,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(folder) = self.tab_folders.get_mut(&folder_id) {
+            folder.color = color;
+        }
+        ctx.notify();
+    }
+
+    fn delete_tab_folder(&mut self, folder_id: LocalFolderId, ctx: &mut ViewContext<Self>) {
+        let Some(position) = self
+            .sidebar_layout
+            .iter()
+            .position(|item| matches!(item, SidebarItem::Folder { id, .. } if *id == folder_id))
+        else {
+            return;
+        };
+        let SidebarItem::Folder { children, .. } = self.sidebar_layout.remove(position) else {
+            return;
+        };
+        for (offset, child) in children.into_iter().enumerate() {
+            self.sidebar_layout
+                .insert(position + offset, SidebarItem::Tab(child));
+        }
+        self.tab_folders.remove(&folder_id);
+        ctx.notify();
+    }
+
+    fn remove_tab_from_sidebar_layout(&mut self, tab_id: LocalTabId) {
+        let mut top_level_remove: Option<usize> = None;
+        for (index, item) in self.sidebar_layout.iter_mut().enumerate() {
+            match item {
+                SidebarItem::Tab(id) if *id == tab_id => {
+                    top_level_remove = Some(index);
+                    break;
+                }
+                SidebarItem::Folder { children, .. } => {
+                    if let Some(child_index) = children.iter().position(|c| *c == tab_id) {
+                        children.remove(child_index);
+                        return;
+                    }
+                }
+                SidebarItem::Tab(_) => {}
+            }
+        }
+        if let Some(index) = top_level_remove {
+            self.sidebar_layout.remove(index);
+        }
+    }
+
+    fn move_tab_into_folder(
+        &mut self,
+        tab_id: LocalTabId,
+        folder_id: LocalFolderId,
+        position_in_folder: usize,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !self.tab_folders.contains_key(&folder_id) {
+            return;
+        }
+        self.remove_tab_from_sidebar_layout(tab_id);
+        for item in self.sidebar_layout.iter_mut() {
+            if let SidebarItem::Folder { id, children } = item {
+                if *id == folder_id {
+                    let pos = position_in_folder.min(children.len());
+                    children.insert(pos, tab_id);
+                    break;
+                }
+            }
+        }
+        ctx.notify();
+    }
+
+    fn move_tab_out_of_folder(
+        &mut self,
+        tab_id: LocalTabId,
+        position_in_sidebar: usize,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.remove_tab_from_sidebar_layout(tab_id);
+        let pos = position_in_sidebar.min(self.sidebar_layout.len());
+        self.sidebar_layout.insert(pos, SidebarItem::Tab(tab_id));
+        ctx.notify();
+    }
+
+    fn reorder_sidebar_tab(
+        &mut self,
+        tab_id: LocalTabId,
+        target_position: usize,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(current_index) = self
+            .sidebar_layout
+            .iter()
+            .position(|item| matches!(item, SidebarItem::Tab(id) if *id == tab_id))
+        else {
+            return;
+        };
+        let item = self.sidebar_layout.remove(current_index);
+        let new_position = target_position.min(self.sidebar_layout.len());
+        self.sidebar_layout.insert(new_position, item);
+        ctx.notify();
+    }
+
+    fn reorder_sidebar_folder(
+        &mut self,
+        folder_id: LocalFolderId,
+        target_position: usize,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(current_index) = self
+            .sidebar_layout
+            .iter()
+            .position(|item| matches!(item, SidebarItem::Folder { id, .. } if *id == folder_id))
+        else {
+            return;
+        };
+        let item = self.sidebar_layout.remove(current_index);
+        let new_position = target_position.min(self.sidebar_layout.len());
+        self.sidebar_layout.insert(new_position, item);
         ctx.notify();
     }
 
@@ -20498,6 +20818,38 @@ impl TypedActionView for Workspace {
             MoveActiveTabRight => self.move_tab(self.active_tab_index, TabMovement::Right, ctx),
             MoveTabLeft(index) => self.move_tab(*index, TabMovement::Left, ctx),
             MoveTabRight(index) => self.move_tab(*index, TabMovement::Right, ctx),
+            CreateTabFolder {
+                initial_name,
+                position_in_sidebar,
+            } => {
+                self.create_tab_folder(initial_name.clone(), *position_in_sidebar, ctx);
+            }
+            RenameTabFolder { folder_id } => self.rename_tab_folder(*folder_id, ctx),
+            SetTabFolderName { folder_id, name } => {
+                self.set_tab_folder_name(*folder_id, name.clone(), ctx)
+            }
+            ToggleTabFolderOpen { folder_id } => self.toggle_tab_folder_open(*folder_id, ctx),
+            DeleteTabFolder { folder_id } => self.delete_tab_folder(*folder_id, ctx),
+            SetTabFolderColor { folder_id, color } => {
+                self.set_tab_folder_color(*folder_id, *color, ctx)
+            }
+            MoveTabIntoFolder {
+                tab_id,
+                folder_id,
+                position_in_folder,
+            } => self.move_tab_into_folder(*tab_id, *folder_id, *position_in_folder, ctx),
+            MoveTabOutOfFolder {
+                tab_id,
+                position_in_sidebar,
+            } => self.move_tab_out_of_folder(*tab_id, *position_in_sidebar, ctx),
+            ReorderSidebarTab {
+                tab_id,
+                target_position,
+            } => self.reorder_sidebar_tab(*tab_id, *target_position, ctx),
+            ReorderSidebarFolder {
+                folder_id,
+                target_position,
+            } => self.reorder_sidebar_folder(*folder_id, *target_position, ctx),
             RenameTab(index) => self.rename_tab(*index, ctx),
             ResetTabName(index) => self.clear_tab_name(*index, ctx),
             RenamePane(locator) => self.rename_pane(*locator, ctx),
@@ -23990,7 +24342,8 @@ impl Workspace {
         });
 
         let index = insertion_index.min(self.tabs.len());
-        let mut tab_data = TabData::new(pane_group);
+        let local_tab_id = self.allocate_local_tab_id();
+        let mut tab_data = TabData::new(pane_group, local_tab_id);
         tab_data.selected_color = color.map_or(SelectedTabColor::Unset, SelectedTabColor::Color);
         tab_data.draggable_state = draggable_state;
         self.tabs.insert(index, tab_data);

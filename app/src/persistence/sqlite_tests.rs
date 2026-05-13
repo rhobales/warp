@@ -151,6 +151,7 @@ fn test_deduplicate_no_snapshots() {
 fn test_terminal_window_snapshot(vertical_tabs_panel_open: bool) -> WindowSnapshot {
     WindowSnapshot {
         tabs: vec![TabSnapshot {
+            local_tab_id: None,
             custom_title: None,
             root: PaneNodeSnapshot::Leaf(LeafSnapshot {
                 is_focused: true,
@@ -176,6 +177,8 @@ fn test_terminal_window_snapshot(vertical_tabs_panel_open: bool) -> WindowSnapsh
             left_panel: None,
             right_panel: None,
         }],
+        tab_folders: Vec::new(),
+        sidebar_layout: Vec::new(),
         active_tab_index: 0,
         bounds: None,
         fullscreen_state: Default::default(),
@@ -234,6 +237,7 @@ fn test_sqlite_round_trips_custom_vertical_tabs_title() {
     let app_state = AppState {
         windows: vec![WindowSnapshot {
             tabs: vec![TabSnapshot {
+                local_tab_id: None,
                 custom_title: None,
                 root: PaneNodeSnapshot::Leaf(LeafSnapshot {
                     is_focused: true,
@@ -259,6 +263,8 @@ fn test_sqlite_round_trips_custom_vertical_tabs_title() {
                 left_panel: None,
                 right_panel: None,
             }],
+            tab_folders: Vec::new(),
+            sidebar_layout: Vec::new(),
             active_tab_index: 0,
             bounds: None,
             fullscreen_state: Default::default(),
@@ -306,6 +312,7 @@ fn test_sqlite_round_trips_code_pane_with_multiple_tabs() {
     let app_state = AppState {
         windows: vec![WindowSnapshot {
             tabs: vec![TabSnapshot {
+                local_tab_id: None,
                 custom_title: None,
                 root: PaneNodeSnapshot::Leaf(LeafSnapshot {
                     is_focused: true,
@@ -333,6 +340,8 @@ fn test_sqlite_round_trips_code_pane_with_multiple_tabs() {
                 left_panel: None,
                 right_panel: None,
             }],
+            tab_folders: Vec::new(),
+            sidebar_layout: Vec::new(),
             active_tab_index: 0,
             bounds: None,
             fullscreen_state: Default::default(),
