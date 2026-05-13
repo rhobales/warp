@@ -60,6 +60,9 @@ pub fn folder_menu_items(
     let current_color = folder.color;
 
     let mut items: Vec<MenuItem<WorkspaceAction>> = vec![
+        MenuItemFields::new("Rename folder")
+            .with_on_select_action(WorkspaceAction::RenameTabFolder { folder_id })
+            .into_item(),
         MenuItemFields::new(if is_open { "Close folder" } else { "Open folder" })
             .with_on_select_action(WorkspaceAction::ToggleTabFolderOpen { folder_id })
             .into_item(),

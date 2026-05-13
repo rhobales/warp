@@ -951,6 +951,8 @@ pub struct Workspace {
     show_tab_right_click_menu: Option<(usize, TabContextMenuAnchor)>,
     tab_folder_context_menu: ViewHandle<Menu<WorkspaceAction>>,
     show_tab_folder_context_menu: Option<(LocalFolderId, Vector2F)>,
+    folder_rename_editor: ViewHandle<EditorView>,
+    folder_being_renamed: Option<LocalFolderId>,
     // TODO(CORE-2300): this used to be add_tab_dropdown_menu.
     // Because we are rolling out the change behind a feature flag,
     // keep this comment here until the feature flag is removed.
@@ -2614,6 +2616,11 @@ impl Workspace {
             me.handle_tab_folder_context_menu_event(event, ctx);
         });
 
+        let folder_rename_editor = Self::tab_rename_editor(ctx);
+        ctx.subscribe_to_view(&folder_rename_editor, move |me, _, event, ctx| {
+            me.handle_folder_rename_editor_event(event, ctx);
+        });
+
         // Subscribe to network changes
         ctx.subscribe_to_model(
             &NetworkStatus::handle(ctx),
@@ -3128,6 +3135,8 @@ impl Workspace {
             show_tab_right_click_menu: None,
             tab_folder_context_menu,
             show_tab_folder_context_menu: None,
+            folder_rename_editor,
+            folder_being_renamed: None,
             new_session_dropdown_menu,
             show_new_session_dropdown_menu: None,
             changelog_model,
@@ -4075,6 +4084,7 @@ impl Workspace {
 
         let local_tab_id = self.allocate_local_tab_id();
         self.tabs.push(TabData::new(new_pane_group, local_tab_id));
+        self.attach_tab_to_sidebar_layout(local_tab_id);
         self.activate_tab_internal(self.tab_count() - 1, ctx);
     }
 
@@ -4151,6 +4161,7 @@ impl Workspace {
         let local_tab_id = self.allocate_local_tab_id();
         self.tabs
             .push(TabData::new(new_pane_group.clone(), local_tab_id));
+        self.attach_tab_to_sidebar_layout(local_tab_id);
         let new_tab_index = self.tab_count() - 1;
         self.tab_mru_order
             .push(self.tabs[new_tab_index].pane_group.id());
@@ -4864,6 +4875,16 @@ impl Workspace {
         let id = LocalFolderId(self.next_local_folder_id);
         self.next_local_folder_id = self.next_local_folder_id.wrapping_add(1);
         id
+    }
+
+    fn attach_tab_to_sidebar_layout(&mut self, local_tab_id: LocalTabId) {
+        let already_present = self.sidebar_layout.iter().any(|item| match item {
+            SidebarItem::Tab(id) => *id == local_tab_id,
+            SidebarItem::Folder { children, .. } => children.contains(&local_tab_id),
+        });
+        if !already_present {
+            self.sidebar_layout.push(SidebarItem::Tab(local_tab_id));
+        }
     }
 
     pub fn is_overflow_menu_showing(&self) -> bool {
@@ -8760,6 +8781,24 @@ impl Workspace {
         }
     }
 
+    pub fn handle_folder_rename_editor_event(
+        &mut self,
+        event: &EditorEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.folder_being_renamed.is_some() {
+            match event {
+                EditorEvent::Blurred | EditorEvent::Enter => {
+                    self.finish_folder_rename(ctx);
+                }
+                EditorEvent::Escape => {
+                    self.cancel_folder_rename(ctx);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn handle_new_session_menu_event(&mut self, event: &MenuEvent, ctx: &mut ViewContext<Self>) {
         match event {
             MenuEvent::Close { .. } => {
@@ -10889,7 +10928,9 @@ impl Workspace {
             pane_group.reattach_panes(ctx);
         });
 
+        let local_tab_id = tab_data.local_tab_id;
         self.tabs.insert(tab_index, tab_data);
+        self.attach_tab_to_sidebar_layout(local_tab_id);
         self.tab_mru_order
             .push(self.tabs[tab_index].pane_group.id());
         self.activate_tab(tab_index, ctx);
@@ -11223,6 +11264,7 @@ impl Workspace {
                 }
             }
         }
+        self.attach_tab_to_sidebar_layout(local_tab_id);
 
         if !is_restoration {
             if *TabSettings::as_ref(ctx).preserve_active_tab_color.value() {
@@ -11293,6 +11335,7 @@ impl Workspace {
             self.tab_mru_order.push(self.tabs[new_idx].pane_group.id());
             self.activate_tab_internal(new_idx, ctx);
         }
+        self.attach_tab_to_sidebar_layout(local_tab_id);
     }
 
     pub fn add_tab_for_cloud_notebook(
@@ -11828,6 +11871,7 @@ impl Workspace {
         let local_tab_id = self.allocate_local_tab_id();
         self.tabs
             .push(TabData::new(new_pane_group.clone(), local_tab_id));
+        self.attach_tab_to_sidebar_layout(local_tab_id);
         let new_tab_index = self.tab_count() - 1;
         self.activate_tab_internal(new_tab_index, ctx);
 
@@ -12324,8 +12368,44 @@ impl Workspace {
         ctx.notify();
     }
 
-    fn rename_tab_folder(&mut self, _folder_id: LocalFolderId, ctx: &mut ViewContext<Self>) {
+    fn rename_tab_folder(&mut self, folder_id: LocalFolderId, ctx: &mut ViewContext<Self>) {
+        let Some(folder) = self.tab_folders.get(&folder_id) else {
+            return;
+        };
+        let current_name = folder.name.clone();
+        self.folder_being_renamed = Some(folder_id);
+        self.folder_rename_editor.update(ctx, |editor, ctx| {
+            editor.clear_buffer_and_reset_undo_stack(ctx);
+            editor.insert_selected_text(&current_name, ctx);
+        });
+        ctx.focus(&self.folder_rename_editor);
         ctx.notify();
+    }
+
+    fn finish_folder_rename(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(folder_id) = self.folder_being_renamed.take() else {
+            return;
+        };
+        let name = self.folder_rename_editor.as_ref(ctx).buffer_text(ctx);
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            if let Some(folder) = self.tab_folders.get_mut(&folder_id) {
+                folder.name = trimmed.to_string();
+            }
+        }
+        self.folder_rename_editor.update(ctx, |editor, ctx| {
+            editor.clear_buffer_and_reset_undo_stack(ctx);
+        });
+        ctx.notify();
+    }
+
+    fn cancel_folder_rename(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.folder_being_renamed.take().is_some() {
+            self.folder_rename_editor.update(ctx, |editor, ctx| {
+                editor.clear_buffer_and_reset_undo_stack(ctx);
+            });
+            ctx.notify();
+        }
     }
 
     fn set_tab_folder_name(
@@ -24420,6 +24500,7 @@ impl Workspace {
         tab_data.selected_color = color.map_or(SelectedTabColor::Unset, SelectedTabColor::Color);
         tab_data.draggable_state = draggable_state;
         self.tabs.insert(index, tab_data);
+        self.attach_tab_to_sidebar_layout(local_tab_id);
         self.activate_tab_internal(index, ctx);
         ctx.notify();
     }
