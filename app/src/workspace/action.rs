@@ -690,6 +690,10 @@ pub enum WorkspaceAction {
         initial_name: String,
         position_in_sidebar: usize,
     },
+    ToggleTabFolderContextMenu {
+        folder_id: LocalFolderId,
+        position: Vector2F,
+    },
     RenameTabFolder {
         folder_id: LocalFolderId,
     },
@@ -860,6 +864,7 @@ impl WorkspaceAction {
             | ToggleSyntaxHighlighting
             | OpenLaunchConfigSaveModal
             | ToggleTabRightClickMenu { .. }
+            | ToggleTabFolderContextMenu { .. }
             | ToggleVerticalTabsPaneContextMenu { .. }
             | OpenNewSessionMenu { .. }
             | ToggleTabConfigsMenu

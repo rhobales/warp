@@ -949,6 +949,8 @@ pub struct Workspace {
     show_tab_bar_overflow_menu: bool,
     tab_right_click_menu: ViewHandle<Menu<WorkspaceAction>>,
     show_tab_right_click_menu: Option<(usize, TabContextMenuAnchor)>,
+    tab_folder_context_menu: ViewHandle<Menu<WorkspaceAction>>,
+    show_tab_folder_context_menu: Option<(LocalFolderId, Vector2F)>,
     // TODO(CORE-2300): this used to be add_tab_dropdown_menu.
     // Because we are rolling out the change behind a feature flag,
     // keep this comment here until the feature flag is removed.
@@ -2607,6 +2609,11 @@ impl Workspace {
         let (tab_right_click_menu, new_session_dropdown_menu, new_session_sidecar_menu) =
             Self::build_menus(ctx);
 
+        let tab_folder_context_menu = ctx.add_typed_action_view(|_| Menu::new());
+        ctx.subscribe_to_view(&tab_folder_context_menu, move |me, _, event, ctx| {
+            me.handle_tab_folder_context_menu_event(event, ctx);
+        });
+
         // Subscribe to network changes
         ctx.subscribe_to_model(
             &NetworkStatus::handle(ctx),
@@ -3119,6 +3126,8 @@ impl Workspace {
             show_tab_bar_overflow_menu: false,
             tab_right_click_menu,
             show_tab_right_click_menu: None,
+            tab_folder_context_menu,
+            show_tab_folder_context_menu: None,
             new_session_dropdown_menu,
             show_new_session_dropdown_menu: None,
             changelog_model,
@@ -6704,6 +6713,31 @@ impl Workspace {
         ctx.notify();
     }
 
+    pub fn toggle_tab_folder_context_menu(
+        &mut self,
+        folder_id: LocalFolderId,
+        position: Vector2F,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.show_tab_folder_context_menu.is_some() {
+            self.show_tab_folder_context_menu = None;
+            ctx.notify();
+            return;
+        }
+        let Some(folder) = self.tab_folders.get(&folder_id) else {
+            return;
+        };
+        let appearance = Appearance::as_ref(ctx);
+        let terminal_colors = appearance.theme().terminal_colors().normal;
+        let menu_items = crate::tab_folder::folder_menu_items(folder, terminal_colors);
+        ctx.update_view(&self.tab_folder_context_menu, |context_menu, view_ctx| {
+            context_menu.set_items(menu_items, view_ctx);
+        });
+        self.show_tab_folder_context_menu = Some((folder_id, position));
+        ctx.focus(&self.tab_folder_context_menu);
+        ctx.notify();
+    }
+
     pub fn toggle_vertical_tabs_pane_context_menu(
         &mut self,
         tab_index: usize,
@@ -8711,6 +8745,17 @@ impl Workspace {
     ) {
         if let MenuEvent::Close { via_select_item: _ } = event {
             self.show_tab_right_click_menu = None;
+            ctx.notify();
+        }
+    }
+
+    fn handle_tab_folder_context_menu_event(
+        &mut self,
+        event: &MenuEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let MenuEvent::Close { via_select_item: _ } = event {
+            self.show_tab_folder_context_menu = None;
             ctx.notify();
         }
     }
@@ -12253,9 +12298,21 @@ impl Workspace {
         position_in_sidebar: usize,
         ctx: &mut ViewContext<Self>,
     ) {
+        let final_name = if name.trim().is_empty() || name == "New Folder" {
+            let mut n = self.tab_folders.len() + 1;
+            loop {
+                let candidate = format!("Folder {n}");
+                if !self.tab_folders.values().any(|f| f.name == candidate) {
+                    break candidate;
+                }
+                n += 1;
+            }
+        } else {
+            name
+        };
         let id = self.allocate_local_folder_id();
         self.tab_folders
-            .insert(id, TabFolderData::new(id, name));
+            .insert(id, TabFolderData::new(id, final_name));
         let position = position_in_sidebar.min(self.sidebar_layout.len());
         self.sidebar_layout.insert(
             position,
@@ -20824,6 +20881,10 @@ impl TypedActionView for Workspace {
             } => {
                 self.create_tab_folder(initial_name.clone(), *position_in_sidebar, ctx);
             }
+            ToggleTabFolderContextMenu {
+                folder_id,
+                position,
+            } => self.toggle_tab_folder_context_menu(*folder_id, *position, ctx),
             RenameTabFolder { folder_id } => self.rename_tab_folder(*folder_id, ctx),
             SetTabFolderName { folder_id, name } => {
                 self.set_tab_folder_name(*folder_id, name.clone(), ctx)
@@ -23342,6 +23403,18 @@ impl View for Workspace {
                     PositionedElementOffsetBounds::Unbounded,
                     PositionedElementAnchor::BottomRight,
                     ChildAnchor::TopRight,
+                ),
+            );
+        }
+
+        if let Some((_, folder_menu_position)) = self.show_tab_folder_context_menu {
+            stack.add_positioned_overlay_child(
+                ChildView::new(&self.tab_folder_context_menu).finish(),
+                OffsetPositioning::offset_from_parent(
+                    folder_menu_position,
+                    ParentOffsetBounds::WindowByPosition,
+                    ParentAnchor::TopLeft,
+                    ChildAnchor::TopLeft,
                 ),
             );
         }

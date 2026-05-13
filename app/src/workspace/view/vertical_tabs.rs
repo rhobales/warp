@@ -6440,6 +6440,12 @@ fn render_folder_node(
     .on_click(move |ctx, _, _| {
         ctx.dispatch_typed_action(WorkspaceAction::ToggleTabFolderOpen { folder_id });
     })
+    .on_right_click(move |ctx, _, position| {
+        ctx.dispatch_typed_action(WorkspaceAction::ToggleTabFolderContextMenu {
+            folder_id,
+            position,
+        });
+    })
     .finish()
 }
 
