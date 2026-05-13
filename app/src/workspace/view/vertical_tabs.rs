@@ -31,7 +31,8 @@ use crate::pane_group::TerminalPane;
 use crate::pane_group::{
     CodePane, NotebookPane, PaneGroup, PaneId, TabBarHoverIndex, WorkflowPane,
 };
-use crate::tab::{tab_position_id, SelectedTabColor, TabData};
+use crate::tab::{tab_position_id, LocalTabId, SelectedTabColor, TabData};
+use crate::tab_folder::{LocalFolderId, SidebarItem, TabFolderData};
 use crate::terminal::session_settings::SessionSettings;
 use crate::terminal::TerminalView;
 use crate::themes::theme::Fill as ThemeFill;
@@ -47,7 +48,8 @@ use crate::workspace::tab_settings::{
     VerticalTabsPrimaryInfo, VerticalTabsTabItemMode, VerticalTabsViewMode,
 };
 use crate::workspace::{
-    PaneViewLocator, TabBarLocation, TabContextMenuAnchor, VerticalTabsPaneContextMenuTarget,
+    FolderDropPosition, PaneViewLocator, TabBarLocation, TabContextMenuAnchor,
+    VerticalTabsFolderDropTargetData, VerticalTabsPaneContextMenuTarget,
     VerticalTabsPaneDropTargetData, Workspace,
 };
 use languages::language_by_filename;
@@ -66,11 +68,11 @@ use warp_core::ui::theme::{AnsiColorIdentifier, Fill as WarpThemeFill, WarpTheme
 use warp_core::ui::Icon as WarpIcon;
 use warpui::elements::DispatchEventResult;
 use warpui::elements::{
-    resizable_state_handle, Border, ChildAnchor, Clipped, ClippedScrollStateHandle,
-    ClippedScrollable, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DragAxis,
-    DragBarSide, Draggable, DropShadow, DropTarget, Element, Empty, EventHandler, Expanded,
-    Fill as ElementFill, Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle,
-    OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
+    resizable_state_handle, AcceptedByDropTarget, Border, ChildAnchor, Clipped,
+    ClippedScrollStateHandle, ClippedScrollable, ConstrainedBox, Container, CornerRadius,
+    CrossAxisAlignment, DragAxis, DragBarSide, Draggable, DropShadow, DropTarget, Element, Empty,
+    EventHandler, Expanded, Fill as ElementFill, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
+    MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
     PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
     ResizableStateHandle, SavePosition, ScrollTarget, ScrollToPositionMode, ScrollbarWidth,
     Shrinkable, Stack, Text,
@@ -1704,20 +1706,49 @@ fn render_groups(
         groups = groups.with_spacing(TABS_MODE_ITEM_SPACING);
     }
 
-    for (visible_tab_index, (tab_index, filtered_pane_ids)) in visible_tabs.iter().enumerate() {
-        // Insert ghost slot before this tab group if the drop would land here.
-        if ghost_insertion_index == Some(*tab_index) {
+    let folders_enabled = FeatureFlag::TabFolders.is_enabled();
+    let local_to_index: HashMap<LocalTabId, usize> = workspace
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.local_tab_id, i))
+        .collect();
+    let visible_filtered: HashMap<usize, Option<Vec<PaneId>>> = visible_tabs
+        .iter()
+        .map(|(idx, ids)| (*idx, ids.clone()))
+        .collect();
+    let in_folder: HashMap<LocalTabId, LocalFolderId> = if folders_enabled {
+        workspace
+            .sidebar_layout
+            .iter()
+            .filter_map(|item| match item {
+                SidebarItem::Folder { id, children } => {
+                    Some(children.iter().map(move |c| (*c, *id)))
+                }
+                SidebarItem::Tab(_) => None,
+            })
+            .flatten()
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    let render_top_level_tab = |groups: &mut Flex,
+                                tab_index: usize,
+                                visible_tab_index: usize,
+                                total_visible: usize,
+                                filtered_pane_ids: Option<&Vec<PaneId>>| {
+        if ghost_insertion_index == Some(tab_index) {
             groups.add_child(render_ghost_vertical_tab_slot(workspace, app));
         }
-        let insert_before_index = *tab_index;
-        let insert_after_index =
-            (visible_tab_index == visible_tabs.len() - 1).then_some(tab_index + 1);
+        let insert_before_index = tab_index;
+        let insert_after_index = (visible_tab_index == total_visible - 1).then_some(tab_index + 1);
         groups.add_child(render_tab_group(
             state,
             workspace,
-            *tab_index,
-            &workspace.tabs[*tab_index],
-            filtered_pane_ids.as_deref(),
+            tab_index,
+            &workspace.tabs[tab_index],
+            filtered_pane_ids.map(|v| v.as_slice()),
             TabGroupDragState {
                 is_any_pane_dragging,
                 insert_before_index,
@@ -1725,6 +1756,102 @@ fn render_groups(
             },
             app,
         ));
+    };
+
+    if folders_enabled {
+        let mut visible_tab_index_counter = 0usize;
+        let total_visible = visible_tabs.len();
+        for item in &workspace.sidebar_layout {
+            match item {
+                SidebarItem::Tab(local_id) => {
+                    let Some(&tab_index) = local_to_index.get(local_id) else {
+                        continue;
+                    };
+                    let Some(filtered) = visible_filtered.get(&tab_index) else {
+                        continue;
+                    };
+                    render_top_level_tab(
+                        &mut groups,
+                        tab_index,
+                        visible_tab_index_counter,
+                        total_visible,
+                        filtered.as_ref(),
+                    );
+                    visible_tab_index_counter += 1;
+                }
+                SidebarItem::Folder { id, children } => {
+                    let Some(folder) = workspace.tab_folders.get(id) else {
+                        continue;
+                    };
+                    let active_local_id = workspace
+                        .tabs
+                        .get(workspace.active_tab_index())
+                        .map(|t| t.local_tab_id);
+                    let has_active_child = active_local_id
+                        .map(|aid| children.contains(&aid))
+                        .unwrap_or(false);
+                    let rename_editor_for_folder = if workspace.folder_being_renamed == Some(*id) {
+                        Some(&workspace.folder_rename_editor)
+                    } else {
+                        None
+                    };
+                    let folder_node = render_folder_node(
+                        folder,
+                        children.len(),
+                        has_active_child,
+                        rename_editor_for_folder,
+                        app,
+                    );
+                    let folder_node_with_drop = DropTarget::new(
+                        folder_node,
+                        VerticalTabsFolderDropTargetData {
+                            folder_id: *id,
+                            position: FolderDropPosition::OnHeader,
+                        },
+                    )
+                    .finish();
+                    groups.add_child(folder_node_with_drop);
+                    if folder.is_open {
+                        for child_local_id in children {
+                            let Some(&tab_index) = local_to_index.get(child_local_id) else {
+                                continue;
+                            };
+                            let Some(filtered) = visible_filtered.get(&tab_index) else {
+                                continue;
+                            };
+                            groups.add_child(
+                                Container::new(render_tab_group(
+                                    state,
+                                    workspace,
+                                    tab_index,
+                                    &workspace.tabs[tab_index],
+                                    filtered.as_ref().map(|v| v.as_slice()),
+                                    TabGroupDragState {
+                                        is_any_pane_dragging,
+                                        insert_before_index: tab_index,
+                                        insert_after_index: None,
+                                    },
+                                    app,
+                                ))
+                                .with_padding(Padding::uniform(0.).with_left(16.))
+                                .finish(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let _ = in_folder;
+    } else {
+        for (visible_tab_index, (tab_index, filtered_pane_ids)) in visible_tabs.iter().enumerate() {
+            render_top_level_tab(
+                &mut groups,
+                *tab_index,
+                visible_tab_index,
+                visible_tabs.len(),
+                filtered_pane_ids.as_ref(),
+            );
+        }
     }
     // Ghost after all tab groups (fencepost).
     if ghost_insertion_index == Some(workspace.tabs.len()) {
@@ -2129,6 +2256,7 @@ fn render_tab_group_internal(
 
     let group_element = group_element.with_defer_events_to_children().finish();
 
+    let tab_local_id = tab.local_tab_id;
     let draggable = Draggable::new(tab.draggable_state.clone(), group_element)
         .on_drag_start(|ctx, _, _| {
             ctx.dispatch_typed_action(WorkspaceAction::StartTabDrag);
@@ -2139,7 +2267,36 @@ fn render_tab_group_internal(
                 tab_position: rect,
             });
         })
-        .on_drop(|ctx, _, _, _| {
+        .with_accepted_by_drop_target_fn(|target, _app| {
+            if target.as_any().is::<VerticalTabsFolderDropTargetData>()
+                || target.as_any().is::<VerticalTabsPaneDropTargetData>()
+            {
+                AcceptedByDropTarget::Yes
+            } else {
+                AcceptedByDropTarget::No
+            }
+        })
+        .on_drop(move |ctx, _, _, drop_target| {
+            if let Some(target) = drop_target {
+                if let Some(folder_target) = target
+                    .as_any()
+                    .downcast_ref::<VerticalTabsFolderDropTargetData>()
+                {
+                    let position_in_folder = match folder_target.position {
+                        FolderDropPosition::OnHeader => usize::MAX,
+                        FolderDropPosition::BeforeChild(idx) => idx,
+                    };
+                    ctx.dispatch_typed_action(WorkspaceAction::MoveTabIntoFolder {
+                        tab_id: tab_local_id,
+                        folder_id: folder_target.folder_id,
+                        position_in_folder,
+                    });
+                    return;
+                }
+            }
+            ctx.dispatch_typed_action(WorkspaceAction::HandleTabDropOnTopLevel {
+                tab_id: tab_local_id,
+            });
             ctx.dispatch_typed_action(WorkspaceAction::DropTab);
         });
     // Only lock the drag to the vertical axis when cross-window tab drag is
@@ -6230,6 +6387,123 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
         .finish();
 
     render_pane_row_element(props, Padding::uniform(8.), true, content, theme)
+}
+
+fn render_folder_node(
+    folder: &TabFolderData,
+    child_count: usize,
+    has_active_child: bool,
+    rename_editor: Option<&ViewHandle<EditorView>>,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let folder_id = folder.id;
+    let is_open = folder.is_open;
+    let name = folder.name.clone();
+    let header_mouse_state = folder.header_mouse_state.clone();
+    let theme_fg: ThemeFill = theme.foreground();
+    let theme_sub: ThemeFill = theme.sub_text_color(theme.background());
+    let accent: ColorU = theme.accent().into();
+    let bg_hover_neutral = internal_colors::fg_overlay_1(theme);
+    let ui_font = appearance.ui_font_family();
+    let terminal_colors = theme.terminal_colors().normal;
+    let resolved_color: Option<ColorU> = match folder.color {
+        SelectedTabColor::Color(ansi_id) => Some(ansi_id.to_ansi_color(&terminal_colors).into()),
+        _ => None,
+    };
+    let rename_editor_for_render = rename_editor.cloned();
+    let count_text = format!("{child_count}");
+    let show_count = *TabSettings::as_ref(app).show_tab_count_in_folder_header.value();
+
+    Hoverable::new(header_mouse_state, move |state| {
+        let icon = if is_open {
+            WarpIcon::ChevronDown
+        } else {
+            WarpIcon::ChevronRight
+        };
+        let is_hovered = state.is_hovered();
+        let bg = match resolved_color {
+            Some(c) => ThemeFill::Solid(coloru_with_opacity(
+                c,
+                if is_hovered {
+                    TAB_COLOR_HOVER_OPACITY
+                } else {
+                    TAB_COLOR_OPACITY
+                },
+            )),
+            None => {
+                if is_hovered {
+                    bg_hover_neutral
+                } else {
+                    ThemeFill::Solid(ColorU::transparent_black())
+                }
+            }
+        };
+        let mut row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(8.)
+            .with_child(
+                ConstrainedBox::new(icon.to_warpui_icon(theme_fg).finish())
+                    .with_width(16.)
+                    .with_height(16.)
+                    .finish(),
+            );
+        if let Some(editor) = rename_editor_for_render.as_ref() {
+            let editor_element = TextInput::new(
+                editor.clone(),
+                UiComponentStyles::default()
+                    .set_background(ElementFill::None)
+                    .set_border_radius(CornerRadius::with_all(Radius::Pixels(0.)))
+                    .set_border_width(0.),
+            )
+            .build()
+            .finish();
+            row = row.with_child(Shrinkable::new(1., editor_element).finish());
+        } else {
+            row = row.with_child(Shrinkable::new(
+                1.,
+                Text::new_inline(name.clone(), ui_font, 14.)
+                    .with_clip(ClipConfig::ellipsis())
+                    .with_color(theme_fg.into())
+                    .finish(),
+            ).finish());
+            if show_count {
+                row = row.with_child(
+                    Text::new_inline(count_text.clone(), ui_font, 12.)
+                        .with_color(theme_sub.into())
+                        .finish(),
+                );
+            }
+        }
+        let mut container = Container::new(row.finish())
+            .with_background(bg)
+            .with_padding(
+                Padding::uniform(8.)
+                    .with_left(GROUP_HORIZONTAL_PADDING)
+                    .with_right(GROUP_HORIZONTAL_PADDING),
+            )
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
+        if has_active_child && !is_open {
+            container = container.with_border(
+                Border::new(2.)
+                    .with_sides(false, false, false, true)
+                    .with_border_fill(ThemeFill::Solid(accent)),
+            );
+        }
+        container.finish()
+    })
+    .with_cursor(Cursor::PointingHand)
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::ToggleTabFolderOpen { folder_id });
+    })
+    .on_right_click(move |ctx, _, position| {
+        ctx.dispatch_typed_action(WorkspaceAction::ToggleTabFolderContextMenu {
+            folder_id,
+            position,
+        });
+    })
+    .finish()
 }
 
 impl Workspace {

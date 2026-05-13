@@ -14,9 +14,9 @@ use super::schema::{
     generic_string_objects, ignored_suggestions, mcp_environment_variables,
     mcp_server_installations, mcp_server_panes, notebook_panes, notebooks, object_actions,
     object_metadata, object_permissions, pane_branches, pane_leaves, pane_nodes, panels,
-    project_rules, projects, server_experiments, settings_panes, tabs, team_members, team_settings,
-    teams, terminal_panes, user_profiles, welcome_panes, windows, workflow_panes, workflows,
-    workspace_language_server, workspace_metadata, workspace_teams, workspaces,
+    project_rules, projects, server_experiments, settings_panes, tab_folders, tabs, team_members,
+    team_settings, teams, terminal_panes, user_profiles, welcome_panes, windows, workflow_panes,
+    workflows, workspace_language_server, workspace_metadata, workspace_teams, workspaces,
 };
 
 #[derive(Insertable)]
@@ -348,6 +348,9 @@ pub struct Tab {
     pub window_id: i32,
     pub custom_title: Option<String>,
     pub color: Option<String>,
+    pub local_tab_id: Option<i32>,
+    pub folder_id: Option<i32>,
+    pub sidebar_position: i32,
 }
 
 #[derive(Insertable)]
@@ -356,6 +359,33 @@ pub struct NewTab {
     pub window_id: i32,
     pub custom_title: Option<String>,
     pub color: Option<String>,
+    pub local_tab_id: Option<i32>,
+    pub folder_id: Option<i32>,
+    pub sidebar_position: i32,
+}
+
+#[derive(Identifiable, Queryable, Associations)]
+#[diesel(belongs_to(Window))]
+#[diesel(table_name = tab_folders)]
+pub struct TabFolder {
+    pub id: i32,
+    pub window_id: i32,
+    pub local_folder_id: i32,
+    pub name: String,
+    pub color: Option<String>,
+    pub is_open: bool,
+    pub sidebar_position: i32,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = tab_folders)]
+pub struct NewTabFolder {
+    pub window_id: i32,
+    pub local_folder_id: i32,
+    pub name: String,
+    pub color: Option<String>,
+    pub is_open: bool,
+    pub sidebar_position: i32,
 }
 
 /// The panes data model includes pane_nodes, pane_leaves and pane_branches.
