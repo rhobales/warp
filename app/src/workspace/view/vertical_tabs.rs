@@ -68,11 +68,11 @@ use warp_core::ui::theme::{AnsiColorIdentifier, Fill as WarpThemeFill, WarpTheme
 use warp_core::ui::Icon as WarpIcon;
 use warpui::elements::DispatchEventResult;
 use warpui::elements::{
-    resizable_state_handle, Border, ChildAnchor, Clipped, ClippedScrollStateHandle,
-    ClippedScrollable, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DragAxis,
-    DragBarSide, Draggable, DropShadow, DropTarget, Element, Empty, EventHandler, Expanded,
-    Fill as ElementFill, Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle,
-    OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
+    resizable_state_handle, AcceptedByDropTarget, Border, ChildAnchor, Clipped,
+    ClippedScrollStateHandle, ClippedScrollable, ConstrainedBox, Container, CornerRadius,
+    CrossAxisAlignment, DragAxis, DragBarSide, Draggable, DropShadow, DropTarget, Element, Empty,
+    EventHandler, Expanded, Fill as ElementFill, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
+    MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
     PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
     ResizableStateHandle, SavePosition, ScrollTarget, ScrollToPositionMode, ScrollbarWidth,
     Shrinkable, Stack, Text,
@@ -1790,7 +1790,18 @@ fn render_groups(
                     let has_active_child = active_local_id
                         .map(|aid| children.contains(&aid))
                         .unwrap_or(false);
-                    let folder_node = render_folder_node(folder, has_active_child, app);
+                    let rename_editor_for_folder = if workspace.folder_being_renamed == Some(*id) {
+                        Some(&workspace.folder_rename_editor)
+                    } else {
+                        None
+                    };
+                    let folder_node = render_folder_node(
+                        folder,
+                        children.len(),
+                        has_active_child,
+                        rename_editor_for_folder,
+                        app,
+                    );
                     let folder_node_with_drop = DropTarget::new(
                         folder_node,
                         VerticalTabsFolderDropTargetData {
@@ -2255,6 +2266,16 @@ fn render_tab_group_internal(
                 tab_index,
                 tab_position: rect,
             });
+        })
+        .with_accepted_by_drop_target_fn(|target, _app| {
+            if target
+                .as_any()
+                .is::<VerticalTabsFolderDropTargetData>()
+            {
+                AcceptedByDropTarget::Yes
+            } else {
+                AcceptedByDropTarget::No
+            }
         })
         .on_drop(move |ctx, _, _, drop_target| {
             if let Some(target) = drop_target {
@@ -6367,7 +6388,9 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
 
 fn render_folder_node(
     folder: &TabFolderData,
+    child_count: usize,
     has_active_child: bool,
+    rename_editor: Option<&ViewHandle<EditorView>>,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
@@ -6377,14 +6400,17 @@ fn render_folder_node(
     let name = folder.name.clone();
     let header_mouse_state = folder.header_mouse_state.clone();
     let theme_fg: ThemeFill = theme.foreground();
+    let theme_sub: ThemeFill = theme.sub_text_color(theme.background());
     let accent: ColorU = theme.accent().into();
-    let bg_hover = internal_colors::fg_overlay_1(theme);
+    let bg_hover_neutral = internal_colors::fg_overlay_1(theme);
     let ui_font = appearance.ui_font_family();
     let terminal_colors = theme.terminal_colors().normal;
     let resolved_color: Option<ColorU> = match folder.color {
         SelectedTabColor::Color(ansi_id) => Some(ansi_id.to_ansi_color(&terminal_colors).into()),
         _ => None,
     };
+    let rename_editor_for_render = rename_editor.cloned();
+    let count_text = format!("{child_count}");
 
     Hoverable::new(header_mouse_state, move |state| {
         let icon = if is_open {
@@ -6392,37 +6418,63 @@ fn render_folder_node(
         } else {
             WarpIcon::ChevronRight
         };
-        let bg = if state.is_hovered() {
-            bg_hover
-        } else {
-            ThemeFill::Solid(ColorU::transparent_black())
+        let is_hovered = state.is_hovered();
+        let bg = match resolved_color {
+            Some(c) => ThemeFill::Solid(coloru_with_opacity(
+                c,
+                if is_hovered {
+                    TAB_COLOR_HOVER_OPACITY
+                } else {
+                    TAB_COLOR_OPACITY
+                },
+            )),
+            None => {
+                if is_hovered {
+                    bg_hover_neutral
+                } else {
+                    ThemeFill::Solid(ColorU::transparent_black())
+                }
+            }
         };
         let mut row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_spacing(6.)
+            .with_spacing(8.)
             .with_child(
                 ConstrainedBox::new(icon.to_warpui_icon(theme_fg).finish())
-                    .with_width(14.)
-                    .with_height(14.)
+                    .with_width(16.)
+                    .with_height(16.)
                     .finish(),
             );
-        if let Some(dot_color) = resolved_color {
-            row = row.with_child(
-                ConstrainedBox::new(WarpIcon::Ellipse.to_warpui_icon(dot_color.into()).finish())
-                    .with_width(10.)
-                    .with_height(10.)
-                    .finish(),
-            );
+        if let Some(editor) = rename_editor_for_render.as_ref() {
+            let editor_element = TextInput::new(
+                editor.clone(),
+                UiComponentStyles::default()
+                    .set_background(ElementFill::None)
+                    .set_border_radius(CornerRadius::with_all(Radius::Pixels(0.)))
+                    .set_border_width(0.),
+            )
+            .build()
+            .finish();
+            row = row.with_child(Shrinkable::new(1., editor_element).finish());
+        } else {
+            row = row
+                .with_child(Shrinkable::new(
+                    1.,
+                    Text::new_inline(name.clone(), ui_font, 14.)
+                        .with_clip(ClipConfig::ellipsis())
+                        .with_color(theme_fg.into())
+                        .finish(),
+                ).finish())
+                .with_child(
+                    Text::new_inline(count_text.clone(), ui_font, 12.)
+                        .with_color(theme_sub.into())
+                        .finish(),
+                );
         }
-        row = row.with_child(
-            Text::new_inline(name.clone(), ui_font, 12.)
-                .with_color(theme_fg.into())
-                .finish(),
-        );
         let mut container = Container::new(row.finish())
             .with_background(bg)
             .with_padding(
-                Padding::uniform(GROUP_HEADER_VERTICAL_PADDING)
+                Padding::uniform(8.)
                     .with_left(GROUP_HORIZONTAL_PADDING)
                     .with_right(GROUP_HORIZONTAL_PADDING),
             )
